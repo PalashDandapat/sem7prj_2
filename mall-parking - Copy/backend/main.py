@@ -4,11 +4,14 @@ Endpoints:
     POST /entry/confirm  -> gatekeeper manually enters mobile + confirms send
     POST /entry/print    -> gatekeeper chooses "print receipt" instead
     POST /exit/detect    -> capture frame, detect plate, free up the slot
+    POST /entry/manual   -> same as /entry/detect but plate typed by gatekeeper
+    POST /exit/manual    -> same as /exit/detect but plate typed by gatekeeper
     GET  /slots          -> current slot status (for the UI to display)
     GET  /overview       -> total / occupied / free counts
     GET  /activity       -> recent entry/exit events
 """
 
+import re
 from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -35,16 +38,17 @@ app.add_middleware(
 init_db()
 
 
-# ------------------------------------------------------------------- entry
-@app.post("/entry/detect")
-async def entry_detect(gate_id: str = Form(...), image: UploadFile = File(...)):
-    image_bytes = await image.read()
-    # Run the heavy ANPR model in a worker thread so the server stays responsive
-    plate_number = await run_in_threadpool(detect_plate, image_bytes)
+# ----------------------------------------------------------------- helpers
+MIN_PLATE_LEN = 6
 
-    if not plate_number:
-        return {"status": "no_plate_detected"}
 
+def normalize_plate(text: str) -> str:
+    """Same cleaning the ANPR uses: only A-Z / 0-9, uppercase."""
+    return re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+
+
+def process_entry(plate_number: str, gate_id: str) -> dict:
+    """Everything that happens AFTER a plate is known (camera OR manual)."""
     existing = check_already_exist(plate_number)
     if existing:
         return {
@@ -84,6 +88,54 @@ async def entry_detect(gate_id: str = Form(...), image: UploadFile = File(...)):
         "plate_number": plate_number,
         "suggested_slot_id": slot_id,
     }
+
+
+def process_exit(plate_number: str, gate_id: str) -> dict:
+    """Everything that happens AFTER a plate is known (camera OR manual)."""
+    conn = get_connection()
+    session = conn.execute(
+        "SELECT * FROM parking_sessions WHERE plate_number = ? AND status = 'active'",
+        (plate_number,),
+    ).fetchone()
+
+    if not session:
+        conn.close()
+        return {"status": "no_active_session", "plate_number": plate_number}
+
+    conn.execute(
+        "UPDATE slots SET status = 'free' WHERE slot_id = ?", (session["slot_id"],)
+    )
+    conn.execute(
+        """UPDATE parking_sessions SET status = 'completed', exit_time = ?, gate_out = ?
+           WHERE id = ?""",
+        (datetime.now().isoformat(), gate_id, session["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    return {"status": "exited", "plate_number": plate_number, "slot_id": session["slot_id"]}
+
+
+# ------------------------------------------------------------------- entry
+@app.post("/entry/detect")
+async def entry_detect(gate_id: str = Form(...), image: UploadFile = File(...)):
+    image_bytes = await image.read()
+    # Run the heavy ANPR model in a worker thread so the server stays responsive
+    plate_number = await run_in_threadpool(detect_plate, image_bytes)
+
+    if not plate_number:
+        return {"status": "no_plate_detected"}
+
+    return process_entry(plate_number, gate_id)
+
+
+@app.post("/entry/manual")
+async def entry_manual(gate_id: str = Form(...), plate_number: str = Form(...)):
+    """Camera not working? The gatekeeper types the plate instead."""
+    plate = normalize_plate(plate_number)
+    if len(plate) < MIN_PLATE_LEN:
+        return {"status": "invalid_plate"}
+    return process_entry(plate, gate_id)
 
 
 @app.post("/entry/confirm")
@@ -145,28 +197,16 @@ async def exit_detect(gate_id: str = Form(...), image: UploadFile = File(...)):
     if not plate_number:
         return {"status": "no_plate_detected"}
 
-    conn = get_connection()
-    session = conn.execute(
-        "SELECT * FROM parking_sessions WHERE plate_number = ? AND status = 'active'",
-        (plate_number,),
-    ).fetchone()
+    return process_exit(plate_number, gate_id)
 
-    if not session:
-        conn.close()
-        return {"status": "no_active_session", "plate_number": plate_number}
 
-    conn.execute(
-        "UPDATE slots SET status = 'free' WHERE slot_id = ?", (session["slot_id"],)
-    )
-    conn.execute(
-        """UPDATE parking_sessions SET status = 'completed', exit_time = ?, gate_out = ?
-           WHERE id = ?""",
-        (datetime.now().isoformat(), gate_id, session["id"]),
-    )
-    conn.commit()
-    conn.close()
-
-    return {"status": "exited", "plate_number": plate_number, "slot_id": session["slot_id"]}
+@app.post("/exit/manual")
+async def exit_manual(gate_id: str = Form(...), plate_number: str = Form(...)):
+    """Camera not working? The gatekeeper types the plate instead."""
+    plate = normalize_plate(plate_number)
+    if len(plate) < MIN_PLATE_LEN:
+        return {"status": "invalid_plate"}
+    return process_exit(plate, gate_id)
 
 
 # --------------------------------------------------------------- dashboard

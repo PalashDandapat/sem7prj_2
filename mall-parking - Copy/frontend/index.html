@@ -92,6 +92,18 @@
   .exit-btn { background: var(--blue); }
   .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
+  /* ---- Manual entry ---- */
+  .manual-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .manual-box h3 { font-size: 14px; color: var(--text-dim); margin: 0 0 4px 0; font-weight: 600; }
+  .manual-box .sub { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+  #manualPlate {
+    width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border);
+    font-size: 18px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+    text-align: center; margin-bottom: 10px;
+  }
+  #manualPlate:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  .manual-box .action-btn { padding: 12px 10px; }
+
   /* ---- Overview ---- */
   .stat-row { display: flex; gap: 12px; margin-bottom: 16px; }
   .stat-box {
@@ -215,6 +227,16 @@
       </div>
       <div id="globalStatus">Waiting...</div>
     </div>
+
+    <div class="manual-box">
+      <h3>Manual Entry / Exit</h3>
+      <div class="sub">Use this if the camera or plate reading isn't working.</div>
+      <input type="text" id="manualPlate" placeholder="e.g. OD02AB1234" maxlength="12" autocomplete="off">
+      <div class="action-row">
+        <button class="action-btn entry-btn" id="manualEntryBtn" onclick="manualEntry()">🚗 Manual Entry</button>
+        <button class="action-btn exit-btn" id="manualExitBtn" onclick="manualExit()">⏎ Manual Exit</button>
+      </div>
+    </div>
   </div>
 
   <!-- Overview + Activity -->
@@ -321,6 +343,8 @@ function setStatus(msg) {
 function setButtonsEnabled(enabled) {
   document.getElementById('entryBtn').disabled = !enabled;
   document.getElementById('exitBtn').disabled = !enabled;
+  document.getElementById('manualEntryBtn').disabled = !enabled;
+  document.getElementById('manualExitBtn').disabled = !enabled;
 }
 
 // ---- Entry ----
@@ -336,28 +360,32 @@ async function detectEntry() {
     const res = await fetch(`${API}/entry/detect`, { method: "POST", body: formData });
     const data = await res.json();
 
-    if (data.status === "no_plate_detected") {
-      setStatus("No plate detected. Try again.");
-    }  else if (data.status === "parked") {
-    setStatus(`${data.plate_number} is already parked at slot ${data.slot_id}.`);
-    }
-  
-    else if (data.status === "full") {
-      setStatus(`Parking full. Plate: ${data.plate_number}`);
-    } else if (data.status === "registered") {
-      setStatus(`${data.plate_number} parked at slot ${data.slot_id}. WhatsApp sent.`);
-      refreshAll();
-    } else if (data.status === "unregistered") {
-      currentPlate = data.plate_number;
-      currentSlot = data.suggested_slot_id;
-      document.getElementById('modalPlate').innerText = "Plate: " + currentPlate;
-      document.getElementById('modalSlot').innerText = currentSlot;
-      document.getElementById('modal').style.display = "flex";
-    }
+    handleEntryResponse(data);
   } catch (e) {
     setStatus("Error reaching server: " + e.message);
   }
   setButtonsEnabled(true);
+}
+
+function handleEntryResponse(data) {
+  if (data.status === "no_plate_detected") {
+    setStatus("No plate detected. Try again.");
+  } else if (data.status === "invalid_plate") {
+    setStatus("Enter a valid plate number (at least 6 letters/digits).");
+  } else if (data.status === "parked") {
+    setStatus(`${data.plate_number} is already parked at slot ${data.slot_id}.`);
+  } else if (data.status === "full") {
+    setStatus(`Parking full. Plate: ${data.plate_number}`);
+  } else if (data.status === "registered") {
+    setStatus(`${data.plate_number} parked at slot ${data.slot_id}. WhatsApp sent.`);
+    refreshAll();
+  } else if (data.status === "unregistered") {
+    currentPlate = data.plate_number;
+    currentSlot = data.suggested_slot_id;
+    document.getElementById('modalPlate').innerText = "Plate: " + currentPlate;
+    document.getElementById('modalSlot').innerText = currentSlot;
+    document.getElementById('modal').style.display = "flex";
+  }
 }
 
 async function confirmWithMobile() {
@@ -372,6 +400,7 @@ async function confirmWithMobile() {
   const res = await fetch(`${API}/entry/confirm`, { method: "POST", body: formData });
   const data = await res.json();
   setStatus(`${currentPlate} parked at slot ${data.slot_id}. WhatsApp sent.`);
+  document.getElementById('manualPlate').value = "";
   closeModal();
   refreshAll();
 }
@@ -385,6 +414,7 @@ async function confirmWithPrint() {
   const res = await fetch(`${API}/entry/print`, { method: "POST", body: formData });
   const data = await res.json();
   setStatus(`${currentPlate} parked at slot ${data.slot_id}. Receipt printed.`);
+  document.getElementById('manualPlate').value = "";
   closeModal();
   refreshAll();
 }
@@ -407,19 +437,72 @@ async function detectExit() {
     const res = await fetch(`${API}/exit/detect`, { method: "POST", body: formData });
     const data = await res.json();
 
-    if (data.status === "exited") {
-      setStatus(`${data.plate_number} exited. Slot ${data.slot_id} is now free.`);
-      refreshAll();
-    } else if (data.status === "no_active_session") {
-      setStatus(`No active session found for ${data.plate_number}.`);
-    } else {
-      setStatus("No plate detected. Try again.");
-    }
+    handleExitResponse(data);
   } catch (e) {
     setStatus("Error reaching server: " + e.message);
   }
   setButtonsEnabled(true);
 }
+
+function handleExitResponse(data) {
+  if (data.status === "exited") {
+    setStatus(`${data.plate_number} exited. Slot ${data.slot_id} is now free.`);
+    refreshAll();
+  } else if (data.status === "no_active_session") {
+    setStatus(`No active session found for ${data.plate_number}.`);
+  } else if (data.status === "invalid_plate") {
+    setStatus("Enter a valid plate number (at least 6 letters/digits).");
+  } else {
+    setStatus("No plate detected. Try again.");
+  }
+}
+
+// ---- Manual entry / exit (no camera needed) ----
+function getManualPlate() {
+  const plate = document.getElementById('manualPlate').value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (plate.length < 6) {
+    setStatus("Enter a valid plate number (at least 6 letters/digits).");
+    return null;
+  }
+  return plate;
+}
+
+async function manualRequest(path, plate, onData) {
+  setButtonsEnabled(false);
+  setStatus(`Processing ${plate}...`);
+  const formData = new FormData();
+  formData.append("gate_id", GATE_ID);
+  formData.append("plate_number", plate);
+  try {
+    const res = await fetch(`${API}${path}`, { method: "POST", body: formData });
+    onData(await res.json());
+  } catch (e) {
+    setStatus("Error reaching server: " + e.message);
+  }
+  setButtonsEnabled(true);
+}
+
+async function manualEntry() {
+  const plate = getManualPlate();
+  if (!plate) return;
+  await manualRequest("/entry/manual", plate, data => {
+    handleEntryResponse(data);
+    if (data.status === "registered") document.getElementById('manualPlate').value = "";
+  });
+}
+
+async function manualExit() {
+  const plate = getManualPlate();
+  if (!plate) return;
+  await manualRequest("/exit/manual", plate, data => {
+    handleExitResponse(data);
+    if (data.status === "exited") document.getElementById('manualPlate').value = "";
+  });
+}
+
+document.getElementById('manualPlate').addEventListener('keydown', e => {
+  if (e.key === 'Enter') manualEntry();
+});
 
 // ---- Overview ----
 async function loadOverview() {
